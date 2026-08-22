@@ -88,8 +88,9 @@ type Connection struct {
 
 	// notificationQueue serializes notification processing to maintain order.
 	// It is bounded to keep memory usage predictable.
-	notificationQueue         chan queuedNotification
-	notificationQueueOverflow NotificationQueueOverflowPolicy
+	notificationQueue          chan queuedNotification
+	notificationQueueOverflow  NotificationQueueOverflowPolicy
+	notificationQueueHighWater atomic.Int64
 }
 
 func NewConnection(handler MethodHandler, peerInput io.Writer, peerOutput io.Reader) *Connection {

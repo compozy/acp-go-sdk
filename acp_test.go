@@ -951,6 +951,9 @@ func TestConnectionBackpressuresNotificationQueueOverflow(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatalf("handled %d notifications, want %d", handled.Load(), wantHandled)
 	}
+	if got := c.NotificationQueueStats().HighWaterMark; got != defaultMaxQueuedNotifications {
+		t.Fatalf("notification queue high-water mark = %d, want %d", got, defaultMaxQueuedNotifications)
+	}
 
 	if err := incomingW.Close(); err != nil {
 		t.Fatalf("close incoming writer: %v", err)

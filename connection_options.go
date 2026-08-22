@@ -22,6 +22,13 @@ type ConnectionOptions struct {
 	NotificationQueueOverflow NotificationQueueOverflowPolicy
 }
 
+// NotificationQueueStats reports bounded inbound notification queue pressure.
+type NotificationQueueStats struct {
+	Capacity      int
+	Queued        int
+	HighWaterMark int
+}
+
 // NewConnectionWithOptions creates a JSON-RPC connection with explicit queue behavior.
 func NewConnectionWithOptions(
 	handler MethodHandler,
@@ -74,13 +81,16 @@ func (c *Connection) enqueueNotification(msg *anyMessage) error {
 	c.notifyMu.Unlock()
 
 	queued := queuedNotification{seq: seq, msg: msg}
+	c.recordNotificationQueueDepth(len(c.notificationQueue))
 	if c.notificationQueueOverflow == NotificationQueueOverflowBlock {
 		c.notificationQueue <- queued
+		c.recordNotificationQueueDepth(len(c.notificationQueue))
 		return nil
 	}
 
 	select {
 	case c.notificationQueue <- queued:
+		c.recordNotificationQueueDepth(len(c.notificationQueue))
 		return nil
 	default:
 		c.notifyMu.Lock()
@@ -93,5 +103,26 @@ func (c *Connection) enqueueNotification(msg *anyMessage) error {
 			panic("completed notification sequence exceeded enqueued notification sequence")
 		}
 		return errNotificationQueueOverflow
+	}
+}
+
+// NotificationQueueStats returns a point-in-time notification queue snapshot.
+func (c *Connection) NotificationQueueStats() NotificationQueueStats {
+	if c == nil {
+		return NotificationQueueStats{}
+	}
+	return NotificationQueueStats{
+		Capacity:      cap(c.notificationQueue),
+		Queued:        len(c.notificationQueue),
+		HighWaterMark: int(c.notificationQueueHighWater.Load()),
+	}
+}
+
+func (c *Connection) recordNotificationQueueDepth(depth int) {
+	for {
+		current := c.notificationQueueHighWater.Load()
+		if int64(depth) <= current || c.notificationQueueHighWater.CompareAndSwap(current, int64(depth)) {
+			return
+		}
 	}
 }
