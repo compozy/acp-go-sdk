@@ -88,36 +88,12 @@ type Connection struct {
 
 	// notificationQueue serializes notification processing to maintain order.
 	// It is bounded to keep memory usage predictable.
-	notificationQueue chan queuedNotification
+	notificationQueue         chan queuedNotification
+	notificationQueueOverflow NotificationQueueOverflowPolicy
 }
 
 func NewConnection(handler MethodHandler, peerInput io.Writer, peerOutput io.Reader) *Connection {
-	ctx, cancel := context.WithCancelCause(context.Background())
-	inboundCtx, inboundCancel := context.WithCancelCause(context.Background())
-	c := &Connection{
-		w:                   peerInput,
-		r:                   peerOutput,
-		handler:             handler,
-		pending:             make(map[string]*pendingResponse),
-		inflight:            make(map[string]context.CancelCauseFunc),
-		cancelRequestSignal: make(chan struct{}, 1),
-		ctx:                 ctx,
-		cancel:              cancel,
-		inboundCtx:          inboundCtx,
-		inboundCancel:       inboundCancel,
-		notificationQueue:   make(chan queuedNotification, defaultMaxQueuedNotifications),
-	}
-	c.notifyCond = sync.NewCond(&c.notifyMu)
-	go func() {
-		<-c.ctx.Done()
-		c.notifyMu.Lock()
-		c.notifyCond.Broadcast()
-		c.notifyMu.Unlock()
-	}()
-	go c.sendCancelRequests()
-	go c.receive()
-	go c.processNotifications()
-	return c
+	return NewConnectionWithOptions(handler, peerInput, peerOutput, ConnectionOptions{})
 }
 
 // SetLogger installs a logger used for internal connection diagnostics.
@@ -425,24 +401,7 @@ func (c *Connection) receive() {
 			// Queue the notification for sequential processing. The sequence number marks
 			// the response-scoped barrier boundary for requests that observe later responses.
 			m := msg
-			c.notifyMu.Lock()
-			c.lastEnqueuedNotificationSeq++
-			seq := c.lastEnqueuedNotificationSeq
-			select {
-			case c.notificationQueue <- queuedNotification{seq: seq, msg: &m}:
-				c.notifyMu.Unlock()
-			default:
-				if c.lastEnqueuedNotificationSeq != seq {
-					c.notifyMu.Unlock()
-					panic("notification sequence advanced while receive goroutine was queueing")
-				}
-				c.lastEnqueuedNotificationSeq--
-				// invariant: completedNotificationSeq never exceeds the highest accepted enqueue.
-				if c.completedNotificationSeq > c.lastEnqueuedNotificationSeq {
-					c.notifyMu.Unlock()
-					panic("completed notification sequence exceeded enqueued notification sequence")
-				}
-				c.notifyMu.Unlock()
+			if err := c.enqueueNotification(&m); err != nil {
 				c.loggerOrDefault().Error("failed to queue notification; closing connection", "err", errNotificationQueueOverflow, "capacity", cap(c.notificationQueue), "queued", len(c.notificationQueue))
 				c.shutdownReceive(errNotificationQueueOverflow)
 				return
@@ -944,4 +903,9 @@ func (c *Connection) prepareNotification(method string, params any) (anyMessage,
 // (typically when the peer disconnects or the input stream is closed).
 func (c *Connection) Done() <-chan struct{} {
 	return c.ctx.Done()
+}
+
+// Cause returns the error that closed the connection, or nil while it is open.
+func (c *Connection) Cause() error {
+	return context.Cause(c.ctx)
 }

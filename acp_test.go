@@ -881,6 +881,82 @@ func TestConnectionFailsFastOnNotificationQueueOverflow(t *testing.T) {
 	waitForNotificationBarrierDrain(t, c, 1*time.Second)
 }
 
+func TestConnectionBackpressuresNotificationQueueOverflow(t *testing.T) {
+	const extraNotifications = 2
+
+	incomingR, incomingW := io.Pipe()
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	allHandled := make(chan struct{})
+	var handled atomic.Int64
+	wantHandled := int64(defaultMaxQueuedNotifications + extraNotifications + 1)
+
+	c := NewConnectionWithOptions(
+		func(context.Context, string, json.RawMessage) (any, *RequestError) {
+			current := handled.Add(1)
+			if current == 1 {
+				close(firstStarted)
+				<-releaseFirst
+			}
+			if current == wantHandled {
+				close(allHandled)
+			}
+			return nil, nil
+		},
+		io.Discard,
+		incomingR,
+		ConnectionOptions{NotificationQueueOverflow: NotificationQueueOverflowBlock},
+	)
+
+	if _, err := io.WriteString(incomingW, `{"jsonrpc":"2.0","method":"test/notify","params":{}}`+"\n"); err != nil {
+		t.Fatalf("write first notification: %v", err)
+	}
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for first notification handler to start")
+	}
+
+	writesDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < defaultMaxQueuedNotifications+extraNotifications; i++ {
+			if _, err := io.WriteString(
+				incomingW,
+				`{"jsonrpc":"2.0","method":"test/notify","params":{}}`+"\n",
+			); err != nil {
+				writesDone <- err
+				return
+			}
+		}
+		writesDone <- nil
+	}()
+
+	select {
+	case <-c.Done():
+		t.Fatalf("connection closed under notification pressure: %v", context.Cause(c.ctx))
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	select {
+	case err := <-writesDone:
+		if err != nil {
+			t.Fatalf("write backpressured notifications: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for backpressured writes")
+	}
+	select {
+	case <-allHandled:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("handled %d notifications, want %d", handled.Load(), wantHandled)
+	}
+
+	if err := incomingW.Close(); err != nil {
+		t.Fatalf("close incoming writer: %v", err)
+	}
+}
+
 // Test initialize method behavior
 func TestConnectionHandlesInitialize(t *testing.T) {
 	c2aR, c2aW := io.Pipe()
