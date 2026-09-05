@@ -407,3 +407,84 @@ func TestShutdownDrainsNotifications_WithBarrier(t *testing.T) {
 		t.Fatalf("timeout waiting for shutdown to drain notifications")
 	}
 }
+
+func TestSendRequestAsync_ReturnsBeforeResponseAndPreservesNotificationBarrier(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	client := &clientFuncs{SessionUpdateFunc: func(context.Context, SessionNotification) error {
+		close(started)
+		<-release
+		return nil
+	}}
+	var peer *AgentSideConnection
+	agent := agentFuncs{LoadSessionFunc: func(ctx context.Context, req LoadSessionRequest) (LoadSessionResponse, error) {
+		if err := peer.SessionUpdate(ctx, testSessionUpdate(req.SessionId, 1)); err != nil {
+			return LoadSessionResponse{}, err
+		}
+		return LoadSessionResponse{}, nil
+	}}
+	conn, peerConn := newNotificationBarrierTestPair(t, client, agent)
+	peer = peerConn
+	result, err := SendRequestAsync[LoadSessionResponse](conn.conn, ctx, AgentMethodSessionLoad, testLoadSessionRequest("async-barrier"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	waitForPendingRequests(t, conn.conn, 0, time.Second)
+	select {
+	case outcome := <-result:
+		t.Fatalf("result passed unfinished notification: %#v", outcome)
+	default:
+	}
+	once.Do(func() { close(release) })
+	select {
+	case outcome := <-result:
+		if outcome.Err != nil {
+			t.Fatal(outcome.Err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if _, open := <-result; open {
+		t.Fatal("result channel must close after one response")
+	}
+}
+
+func TestSendRequestAsync_CancelCleansPendingWithoutReadingResult(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	agent := agentFuncs{LoadSessionFunc: func(ctx context.Context, _ LoadSessionRequest) (LoadSessionResponse, error) {
+		close(started)
+		<-ctx.Done()
+		return LoadSessionResponse{}, ctx.Err()
+	}}
+	conn, _ := newNotificationBarrierTestPair(t, &clientFuncs{}, agent)
+	result, err := SendRequestAsync[LoadSessionResponse](conn.conn, ctx, AgentMethodSessionLoad, testLoadSessionRequest("async-cancel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	cancel()
+	waitForPendingRequests(t, conn.conn, 0, time.Second)
+	select {
+	case outcome := <-result:
+		if outcome.Err == nil {
+			t.Fatal("canceled request returned success")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled request waiter leaked")
+	}
+}
