@@ -583,23 +583,35 @@ func (c *Connection) sendMessage(msg anyMessage) error {
 // SendRequest sends a JSON-RPC request and returns a typed result.
 // For methods that do not return a result, use SendRequestNoResult instead.
 func SendRequest[T any](c *Connection, ctx context.Context, method string, params any) (T, error) {
-	var result T
+	pr, idKey, err := c.startRequest(ctx, method, params)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return awaitRequestResponse[T](c, ctx, pr, idKey)
+}
 
+func (c *Connection) startRequest(ctx context.Context, method string, params any) (*pendingResponse, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", toReqErr(err)
+	}
 	msg, idKey, err := c.prepareRequest(method, params)
 	if err != nil {
-		return result, err
+		return nil, "", err
 	}
-
 	pr := &pendingResponse{ch: make(chan responseEnvelope, 1)}
 	c.mu.Lock()
 	c.pending[idKey] = pr
 	c.mu.Unlock()
-
 	if err := c.sendMessage(msg); err != nil {
 		c.cleanupPending(idKey)
-		return result, NewInternalError(map[string]any{"error": err.Error()})
+		return nil, "", NewInternalError(map[string]any{"error": err.Error()})
 	}
+	return pr, idKey, nil
+}
 
+func awaitRequestResponse[T any](c *Connection, ctx context.Context, pr *pendingResponse, idKey string) (T, error) {
+	var result T
 	resp, err := c.waitForResponse(ctx, pr, idKey)
 	if err != nil {
 		return result, err
@@ -607,11 +619,9 @@ func SendRequest[T any](c *Connection, ctx context.Context, method string, param
 	if err := c.waitNotificationsUpTo(ctx, resp.notificationWatermark); err != nil {
 		return result, err
 	}
-
 	if resp.msg.Error != nil {
 		return result, resp.msg.Error
 	}
-
 	if len(resp.msg.Result) > 0 {
 		if err := json.Unmarshal(resp.msg.Result, &result); err != nil {
 			return result, NewInternalError(map[string]any{"error": err.Error()})
