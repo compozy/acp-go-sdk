@@ -828,6 +828,9 @@ func jenTypeFor(d *load.Definition) Code {
 
 // jenTypeForOptional maps unions that include null to pointer types where applicable.
 func jenTypeForOptional(d *load.Definition) Code {
+	if d != nil && d.RawJSON {
+		return Qual("encoding/json", "RawMessage")
+	}
 	if d == nil {
 		return Any()
 	}

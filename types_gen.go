@@ -904,7 +904,8 @@ type ClientCapabilities struct {
 	// This capability is not part of the spec yet, and may be removed or changed at any point.
 	//
 	// The position encodings supported by the client, in order of preference.
-	PositionEncodings []PositionEncodingKind `json:"positionEncodings,omitempty"`
+	PositionEncodings []PositionEncodingKind     `json:"positionEncodings,omitempty"`
+	Session           *ClientSessionCapabilities `json:"session,omitempty"`
 	// Whether the Client support all 'terminal/*' methods.
 	//
 	// Defaults to false if unset.
@@ -1099,6 +1100,12 @@ func (u ClientResponse) MarshalJSON() ([]byte, error) {
 	return []byte{}, nil
 }
 
+// Session-related capabilities supported by the client.
+type ClientSessionCapabilities struct {
+	Meta       map[string]any          `json:"_meta,omitempty"`
+	Compaction *CompactionCapabilities `json:"compaction,omitempty"`
+}
+
 // Request parameters for closing an active session.
 //
 // If supported, the agent **must** cancel any ongoing work related to the session
@@ -1133,6 +1140,34 @@ type CloseSessionResponse struct {
 
 func (v *CloseSessionResponse) Validate() error {
 	return nil
+}
+
+// **UNSTABLE** Support for the complete ID-addressed compaction contract.
+type CompactionCapabilities struct{}
+
+// **UNSTABLE** Unique identifier for a context compaction within a session.
+type CompactionId string
+
+// **UNSTABLE** Open lifecycle status: in_progress, completed, failed, cancelled, or a future/vendor status.
+type CompactionStatus string
+
+// **UNSTABLE** One content block appended to the summary of an in-progress compaction.
+type CompactionSummaryChunk struct {
+	Meta         map[string]any `json:"_meta,omitempty"`
+	CompactionId CompactionId   `json:"compactionId"`
+	Content      ContentBlock   `json:"content"`
+}
+
+// **UNSTABLE** An ID-addressed context compaction upsert. Summary, error, and _meta have patch semantics.
+type CompactionUpdate struct {
+	// Patch semantics: omitted leaves unchanged; null clears; a value replaces. Raw JSON preserves all three states.
+	Meta         json.RawMessage `json:"_meta,omitempty"`
+	CompactionId CompactionId    `json:"compactionId"`
+	// Patch semantics: omitted leaves unchanged; null clears; a value replaces. Raw JSON preserves all three states.
+	Error  json.RawMessage  `json:"error,omitempty"`
+	Status CompactionStatus `json:"status"`
+	// Patch semantics: omitted leaves unchanged; null clears; a value replaces. Raw JSON preserves all three states.
+	Summary json.RawMessage `json:"summary,omitempty"`
 }
 
 // Session configuration options have been updated.
@@ -2708,7 +2743,7 @@ type McpServer struct {
 	//
 	// This capability is not part of the spec yet, and may be removed or changed at any point.
 	//
-	// # ACP transport configuration
+	// ACP transport configuration
 	//
 	// Only available when the Agent capabilities indicate 'mcp_capabilities.acp' is 'true'.
 	// The MCP server is provided by an ACP component and communicates over the ACP channel.
@@ -5256,6 +5291,27 @@ type SessionUsageUpdate struct {
 	Used int `json:"used"`
 }
 
+// **UNSTABLE** An ID-addressed context compaction upsert. Summary, error, and _meta have patch semantics.
+type SessionCompactionUpdate struct {
+	// Patch semantics: omitted leaves unchanged; null clears; a value replaces. Raw JSON preserves all three states.
+	Meta         json.RawMessage `json:"_meta,omitempty"`
+	CompactionId CompactionId    `json:"compactionId"`
+	// Patch semantics: omitted leaves unchanged; null clears; a value replaces. Raw JSON preserves all three states.
+	Error         json.RawMessage  `json:"error,omitempty"`
+	SessionUpdate string           `json:"sessionUpdate"`
+	Status        CompactionStatus `json:"status"`
+	// Patch semantics: omitted leaves unchanged; null clears; a value replaces. Raw JSON preserves all three states.
+	Summary json.RawMessage `json:"summary,omitempty"`
+}
+
+// **UNSTABLE** One content block appended to the summary of an in-progress compaction.
+type SessionUpdateCompactionSummaryChunk struct {
+	Meta          map[string]any `json:"_meta,omitempty"`
+	CompactionId  CompactionId   `json:"compactionId"`
+	Content       ContentBlock   `json:"content"`
+	SessionUpdate string         `json:"sessionUpdate"`
+}
+
 type SessionUpdate struct {
 	// A chunk of the user's message being streamed.
 	UserMessageChunk *SessionUpdateUserMessageChunk `json:"-"`
@@ -5298,6 +5354,10 @@ type SessionUpdate struct {
 	//
 	// Context window and cost update for the session.
 	UsageUpdate *SessionUsageUpdate `json:"-"`
+	// **UNSTABLE** An ID-addressed context compaction upsert. Summary, error, and _meta have patch semantics.
+	CompactionUpdate *SessionCompactionUpdate `json:"-"`
+	// **UNSTABLE** One content block appended to the summary of an in-progress compaction.
+	CompactionSummaryChunk *SessionUpdateCompactionSummaryChunk `json:"-"`
 }
 
 func (u *SessionUpdate) UnmarshalJSON(b []byte) error {
@@ -5399,6 +5459,20 @@ func (u *SessionUpdate) UnmarshalJSON(b []byte) error {
 					return errors.New("invalid variant payload")
 				}
 				u.UsageUpdate = &v
+				return nil
+			case "compaction_update":
+				var v SessionCompactionUpdate
+				if json.Unmarshal(b, &v) != nil {
+					return errors.New("invalid variant payload")
+				}
+				u.CompactionUpdate = &v
+				return nil
+			case "compaction_summary_chunk":
+				var v SessionUpdateCompactionSummaryChunk
+				if json.Unmarshal(b, &v) != nil {
+					return errors.New("invalid variant payload")
+				}
+				u.CompactionSummaryChunk = &v
 				return nil
 			}
 		}
@@ -5626,6 +5700,46 @@ func (u *SessionUpdate) UnmarshalJSON(b []byte) error {
 				return nil
 			}
 		}
+		{
+			var v SessionCompactionUpdate
+			var match bool = true
+			if _, ok := m["sessionUpdate"]; !ok {
+				match = false
+			}
+			if _, ok := m["compactionId"]; !ok {
+				match = false
+			}
+			if _, ok := m["status"]; !ok {
+				match = false
+			}
+			if match {
+				if json.Unmarshal(b, &v) != nil {
+					return errors.New("invalid variant payload")
+				}
+				u.CompactionUpdate = &v
+				return nil
+			}
+		}
+		{
+			var v SessionUpdateCompactionSummaryChunk
+			var match bool = true
+			if _, ok := m["sessionUpdate"]; !ok {
+				match = false
+			}
+			if _, ok := m["compactionId"]; !ok {
+				match = false
+			}
+			if _, ok := m["content"]; !ok {
+				match = false
+			}
+			if match {
+				if json.Unmarshal(b, &v) != nil {
+					return errors.New("invalid variant payload")
+				}
+				u.CompactionSummaryChunk = &v
+				return nil
+			}
+		}
 	} else {
 		if _, ok := err.(*json.UnmarshalTypeError); !ok {
 			return err
@@ -5722,6 +5836,20 @@ func (u *SessionUpdate) UnmarshalJSON(b []byte) error {
 		var v SessionUsageUpdate
 		if json.Unmarshal(b, &v) == nil {
 			u.UsageUpdate = &v
+			return nil
+		}
+	}
+	{
+		var v SessionCompactionUpdate
+		if json.Unmarshal(b, &v) == nil {
+			u.CompactionUpdate = &v
+			return nil
+		}
+	}
+	{
+		var v SessionUpdateCompactionSummaryChunk
+		if json.Unmarshal(b, &v) == nil {
+			u.CompactionSummaryChunk = &v
 			return nil
 		}
 	}
@@ -5884,6 +6012,30 @@ func (u SessionUpdate) MarshalJSON() ([]byte, error) {
 		m["sessionUpdate"] = "usage_update"
 		return json.Marshal(m)
 	}
+	if u.CompactionUpdate != nil {
+		_b, _e := json.Marshal(*u.CompactionUpdate)
+		if _e != nil {
+			return []byte{}, _e
+		}
+		var m map[string]any
+		if json.Unmarshal(_b, &m) != nil {
+			return []byte{}, errors.New("invalid variant payload")
+		}
+		m["sessionUpdate"] = "compaction_update"
+		return json.Marshal(m)
+	}
+	if u.CompactionSummaryChunk != nil {
+		_b, _e := json.Marshal(*u.CompactionSummaryChunk)
+		if _e != nil {
+			return []byte{}, _e
+		}
+		var m map[string]any
+		if json.Unmarshal(_b, &m) != nil {
+			return []byte{}, errors.New("invalid variant payload")
+		}
+		m["sessionUpdate"] = "compaction_summary_chunk"
+		return json.Marshal(m)
+	}
 	return []byte{}, nil
 }
 
@@ -5926,6 +6078,12 @@ func (u *SessionUpdate) Validate() error {
 		count++
 	}
 	if u.UsageUpdate != nil {
+		count++
+	}
+	if u.CompactionUpdate != nil {
+		count++
+	}
+	if u.CompactionSummaryChunk != nil {
 		count++
 	}
 	if count != 1 {
@@ -7906,7 +8064,7 @@ type UnstableMcpServer struct {
 	//
 	// This capability is not part of the spec yet, and may be removed or changed at any point.
 	//
-	// # ACP transport configuration
+	// ACP transport configuration
 	//
 	// Only available when the Agent capabilities indicate 'mcp_capabilities.acp' is 'true'.
 	// The MCP server is provided by an ACP component and communicates over the ACP channel.

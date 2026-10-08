@@ -115,3 +115,46 @@ func TestSessionConfigOptionSelect_MetadataUnmarshalAndMarshal(t *testing.T) {
 		t.Fatalf("identity metadata not emitted in json: %s", string(b))
 	}
 }
+
+// Invariant: the optional capability advertises {} and update patches retain
+// omitted/null/value on the ACP wire. Owning layer and suite: SDK JSON codecs.
+func TestCompaction_WireParity(t *testing.T) {
+	caps := ClientCapabilities{Session: &ClientSessionCapabilities{Compaction: &CompactionCapabilities{}}}
+	wire, err := json.Marshal(caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(wire, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if ok, got, want := equalJSON(raw["session"], []byte(`{"compaction":{}}`)); !ok {
+		t.Fatalf("capability mismatch: got %s want %s", got, want)
+	}
+	for _, payload := range []string{
+		`{"sessionUpdate":"compaction_update","compactionId":"c1","status":"in_progress"}`,
+		`{"sessionUpdate":"compaction_update","compactionId":"c1","status":"completed","summary":null,"error":null,"_meta":null}`,
+		`{"sessionUpdate":"compaction_update","compactionId":"c1","status":"completed","summary":[]}`,
+		`{"sessionUpdate":"compaction_update","compactionId":"c1","status":"completed","summary":[{"type":"text","text":"summary"}],"_meta":{"vendor":true}}`,
+		`{"sessionUpdate":"compaction_update","compactionId":"c1","status":"failed","error":"failure"}`,
+		`{"sessionUpdate":"compaction_update","compactionId":"c1","status":"_paused"}`,
+		`{"sessionUpdate":"compaction_summary_chunk","compactionId":"c1","content":{"type":"text","text":"chunk"}}`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			var update SessionUpdate
+			if err := json.Unmarshal([]byte(payload), &update); err != nil {
+				t.Fatal(err)
+			}
+			if update.CompactionUpdate == nil && update.CompactionSummaryChunk == nil {
+				t.Fatalf("wrong union variant: %+v", update)
+			}
+			wire, err := json.Marshal(update)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok, got, want := equalJSON(wire, []byte(payload)); !ok {
+				t.Fatalf("update mismatch: got %s want %s", got, want)
+			}
+		})
+	}
+}

@@ -45,8 +45,10 @@ type Definition struct {
 	DocsIgnore  bool                   `json:"x-docs-ignore"`
 	Title       string                 `json:"title"`
 	Const       any                    `json:"const"`
-	XSide       string                 `json:"x-side"`
-	XMethod     string                 `json:"x-method"`
+	// RawJSON preserves omission versus explicit null for patch-valued fields.
+	RawJSON bool   `json:"x-go-raw-json"`
+	XSide   string `json:"x-side"`
+	XMethod string `json:"x-method"`
 	// Default holds the JSON Schema default value, when present.
 	// Used by generators to synthesize defaulting behavior.
 	Default any `json:"default"`
