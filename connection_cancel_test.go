@@ -690,8 +690,15 @@ func TestInboundRequestCancellationBehindNotification(t *testing.T) {
 		write(`{"jsonrpc":"2.0","id":1,"method":"permission"}`)
 		write(`{"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":1}}`)
 		var response anyMessage
-		if err := json.NewDecoder(outR).Decode(&response); err != nil {
-			t.Fatal(err)
+		decoded := make(chan error, 1)
+		go func() { decoded <- json.NewDecoder(outR).Decode(&response) }()
+		select {
+		case err := <-decoded:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("cancellation did not bypass the blocked notification")
 		}
 		if response.Error == nil || response.Error.Code != -32800 {
 			t.Fatalf("response = %+v", response)

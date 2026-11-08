@@ -387,12 +387,12 @@ func (c *Connection) receive() {
 				c.mu.Unlock()
 
 				m := msg
-				c.notifyMu.Lock()
 				var watermark uint64
 				if c.waitForNotificationsBeforeRequests {
+					c.notifyMu.Lock()
 					watermark = c.lastEnqueuedNotificationSeq
+					c.notifyMu.Unlock()
 				}
-				c.notifyMu.Unlock()
 				go func(m *anyMessage, idKey string, reqCtx context.Context, cancel context.CancelCauseFunc) {
 					defer func() {
 						c.mu.Lock()

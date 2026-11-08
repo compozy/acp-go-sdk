@@ -18,9 +18,10 @@ const (
 
 // ConnectionOptions configures bounded inbound notification handling.
 type ConnectionOptions struct {
-	// WaitForNotificationsBeforeRequests delays inbound request handlers until earlier
-	// notifications finish. Later notifications and cancellation remain independent.
-	// The default false preserves concurrent request dispatch.
+	// WaitForNotificationsBeforeRequests delays every inbound request handler, including
+	// file and terminal callbacks, until earlier notifications finish. Later notifications
+	// remain independent. Cancellation can still be read unless NotificationQueueOverflowBlock
+	// has saturated the receive queue. The default false preserves concurrent request dispatch.
 	WaitForNotificationsBeforeRequests bool
 	MaxQueuedNotifications             int
 	NotificationQueueOverflow          NotificationQueueOverflowPolicy
