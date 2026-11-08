@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
@@ -486,5 +487,84 @@ func TestSendRequestAsync_CancelCleansPendingWithoutReadingResult(t *testing.T) 
 		}
 	case <-time.After(time.Second):
 		t.Fatal("canceled request waiter leaked")
+	}
+}
+
+// TestConnection_InboundRequestNotificationBarrier verifies opt-in request ordering and independent notification progress.
+func TestConnection_InboundRequestNotificationBarrier(t *testing.T) {
+	for _, ordered := range []bool{false, true} {
+		ordered := ordered
+		t.Run(fmt.Sprintf("Should preserve opt-in ordering=%v", ordered), func(t *testing.T) {
+			t.Parallel()
+			inR, inW := io.Pipe()
+			before := make(chan struct{})
+			var beforeFinished atomic.Bool
+			var requestSawBefore bool
+			after := make(chan struct{})
+			request := make(chan struct{})
+			later := make(chan struct{})
+			releaseBefore := make(chan struct{})
+			releaseAfter := make(chan struct{})
+			releaseRequest := make(chan struct{})
+			unblockBefore := sync.OnceFunc(func() { close(releaseBefore) })
+			unblockAfter := sync.OnceFunc(func() { close(releaseAfter) })
+			unblockRequest := sync.OnceFunc(func() { close(releaseRequest) })
+			t.Cleanup(func() { unblockBefore(); unblockAfter(); unblockRequest(); _ = inW.Close(); _ = inR.Close() })
+			NewConnectionWithOptions(func(ctx context.Context, method string, params json.RawMessage) (any, *RequestError) {
+				switch method {
+				case "before":
+					close(before)
+					<-releaseBefore
+					beforeFinished.Store(true)
+				case "after":
+					close(after)
+					<-releaseAfter
+				case "permission":
+					requestSawBefore = beforeFinished.Load()
+					close(request)
+					<-releaseRequest
+				case "later":
+					close(later)
+				}
+				return nil, nil
+			}, io.Discard, inR, ConnectionOptions{MaxQueuedNotifications: 1, NotificationQueueOverflow: NotificationQueueOverflowBlock, WaitForNotificationsBeforeRequests: ordered})
+			write := func(line string) {
+				t.Helper()
+				if _, err := io.WriteString(inW, line+"\n"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wait := func(ch <-chan struct{}) {
+				t.Helper()
+				select {
+				case <-ch:
+				case <-time.After(2 * time.Second):
+					t.Fatal("dispatch did not progress")
+				}
+			}
+			write(`{"jsonrpc":"2.0","method":"before"}`)
+			wait(before)
+			write(`{"jsonrpc":"2.0","id":1,"method":"permission"}`)
+			if ordered {
+				select {
+				case <-request:
+					t.Fatal("request overtook preceding notification")
+				case <-time.After(100 * time.Millisecond):
+				}
+			} else {
+				wait(request)
+			}
+			write(`{"jsonrpc":"2.0","method":"after"}`)
+			unblockBefore()
+			wait(after)
+			wait(request)
+			if ordered && !requestSawBefore {
+				t.Fatal("request handler started before preceding notification returned")
+			}
+			unblockAfter()
+			write(`{"jsonrpc":"2.0","method":"later"}`)
+			wait(later)
+			unblockRequest()
+		})
 	}
 }
