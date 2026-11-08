@@ -18,8 +18,12 @@ const (
 
 // ConnectionOptions configures bounded inbound notification handling.
 type ConnectionOptions struct {
-	MaxQueuedNotifications    int
-	NotificationQueueOverflow NotificationQueueOverflowPolicy
+	// WaitForNotificationsBeforeRequests delays inbound request handlers until earlier
+	// notifications finish. Later notifications and cancellation remain independent.
+	// The default false preserves concurrent request dispatch.
+	WaitForNotificationsBeforeRequests bool
+	MaxQueuedNotifications             int
+	NotificationQueueOverflow          NotificationQueueOverflowPolicy
 }
 
 // NotificationQueueStats reports bounded inbound notification queue pressure.
@@ -48,18 +52,19 @@ func NewConnectionWithOptions(
 	ctx, cancel := context.WithCancelCause(context.Background())
 	inboundCtx, inboundCancel := context.WithCancelCause(context.Background())
 	c := &Connection{
-		w:                         peerInput,
-		r:                         peerOutput,
-		handler:                   handler,
-		pending:                   make(map[string]*pendingResponse),
-		inflight:                  make(map[string]context.CancelCauseFunc),
-		cancelRequestSignal:       make(chan struct{}, 1),
-		ctx:                       ctx,
-		cancel:                    cancel,
-		inboundCtx:                inboundCtx,
-		inboundCancel:             inboundCancel,
-		notificationQueue:         make(chan queuedNotification, maxQueuedNotifications),
-		notificationQueueOverflow: overflow,
+		w:                                  peerInput,
+		r:                                  peerOutput,
+		handler:                            handler,
+		pending:                            make(map[string]*pendingResponse),
+		inflight:                           make(map[string]context.CancelCauseFunc),
+		cancelRequestSignal:                make(chan struct{}, 1),
+		ctx:                                ctx,
+		cancel:                             cancel,
+		inboundCtx:                         inboundCtx,
+		inboundCancel:                      inboundCancel,
+		notificationQueue:                  make(chan queuedNotification, maxQueuedNotifications),
+		notificationQueueOverflow:          overflow,
+		waitForNotificationsBeforeRequests: options.WaitForNotificationsBeforeRequests,
 	}
 	c.notifyCond = sync.NewCond(&c.notifyMu)
 	go func() {

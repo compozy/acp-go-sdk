@@ -88,9 +88,10 @@ type Connection struct {
 
 	// notificationQueue serializes notification processing to maintain order.
 	// It is bounded to keep memory usage predictable.
-	notificationQueue          chan queuedNotification
-	notificationQueueOverflow  NotificationQueueOverflowPolicy
-	notificationQueueHighWater atomic.Int64
+	waitForNotificationsBeforeRequests bool
+	notificationQueue                  chan queuedNotification
+	notificationQueueOverflow          NotificationQueueOverflowPolicy
+	notificationQueueHighWater         atomic.Int64
 }
 
 func NewConnection(handler MethodHandler, peerInput io.Writer, peerOutput io.Reader) *Connection {
@@ -386,6 +387,12 @@ func (c *Connection) receive() {
 				c.mu.Unlock()
 
 				m := msg
+				c.notifyMu.Lock()
+				var watermark uint64
+				if c.waitForNotificationsBeforeRequests {
+					watermark = c.lastEnqueuedNotificationSeq
+				}
+				c.notifyMu.Unlock()
 				go func(m *anyMessage, idKey string, reqCtx context.Context, cancel context.CancelCauseFunc) {
 					defer func() {
 						c.mu.Lock()
@@ -394,6 +401,16 @@ func (c *Connection) receive() {
 
 						cancel(nil)
 					}()
+					if c.waitForNotificationsBeforeRequests {
+						if err := c.waitNotificationsUpTo(reqCtx, watermark); err != nil {
+							_ = c.sendMessage(anyMessage{JSONRPC: "2.0", ID: m.ID, Error: toReqErr(err)})
+							return
+						}
+						if err := reqCtx.Err(); err != nil {
+							_ = c.sendMessage(anyMessage{JSONRPC: "2.0", ID: m.ID, Error: toReqErr(err)})
+							return
+						}
+					}
 					c.handleInbound(reqCtx, m)
 				}(&m, idKey, reqCtx, cancel)
 				continue

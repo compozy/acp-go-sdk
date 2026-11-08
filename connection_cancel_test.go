@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -655,4 +657,46 @@ func TestConnectionWaitForResponse_PeerDisconnectWinsOverDerivedContextCancel(t 
 			t.Fatalf("iteration %d: pending request %q was not cleaned up", i, idKey)
 		}
 	}
+}
+
+func TestInboundRequestCancellationBehindNotification(t *testing.T) {
+	t.Run("Should cancel a request while preceding notification is blocked", func(t *testing.T) {
+		t.Parallel()
+		inR, inW := io.Pipe()
+		outR, outW := io.Pipe()
+		release := make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(func() { unblock(); _ = inW.Close(); _ = inR.Close(); _ = outW.Close(); _ = outR.Close() })
+		started := make(chan struct{})
+		var called atomic.Bool
+		NewConnectionWithOptions(func(ctx context.Context, method string, params json.RawMessage) (any, *RequestError) {
+			if method == "update" {
+				close(started)
+				<-release
+				return nil, nil
+			}
+			called.Store(true)
+			return nil, nil
+		}, outW, inR, ConnectionOptions{WaitForNotificationsBeforeRequests: true})
+		write := func(line string) {
+			t.Helper()
+			if _, err := io.WriteString(inW, line+"\n"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write(`{"jsonrpc":"2.0","method":"update"}`)
+		<-started
+		write(`{"jsonrpc":"2.0","id":1,"method":"permission"}`)
+		write(`{"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":1}}`)
+		var response anyMessage
+		if err := json.NewDecoder(outR).Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Error == nil || response.Error.Code != -32800 {
+			t.Fatalf("response = %+v", response)
+		}
+		if called.Load() {
+			t.Fatal("canceled request invoked handler before preceding notification completed")
+		}
+	})
 }
