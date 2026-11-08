@@ -659,6 +659,7 @@ func TestConnectionWaitForResponse_PeerDisconnectWinsOverDerivedContextCancel(t 
 	}
 }
 
+// TestInboundRequestCancellationBehindNotification verifies cancellation bypasses a blocked notification barrier.
 func TestInboundRequestCancellationBehindNotification(t *testing.T) {
 	t.Run("Should cancel a request while preceding notification is blocked", func(t *testing.T) {
 		t.Parallel()

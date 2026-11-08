@@ -490,6 +490,7 @@ func TestSendRequestAsync_CancelCleansPendingWithoutReadingResult(t *testing.T) 
 	}
 }
 
+// TestConnection_InboundRequestNotificationBarrier verifies opt-in request ordering and independent notification progress.
 func TestConnection_InboundRequestNotificationBarrier(t *testing.T) {
 	for _, ordered := range []bool{false, true} {
 		ordered := ordered
@@ -497,6 +498,8 @@ func TestConnection_InboundRequestNotificationBarrier(t *testing.T) {
 			t.Parallel()
 			inR, inW := io.Pipe()
 			before := make(chan struct{})
+			var beforeFinished atomic.Bool
+			var requestSawBefore bool
 			after := make(chan struct{})
 			request := make(chan struct{})
 			later := make(chan struct{})
@@ -512,10 +515,12 @@ func TestConnection_InboundRequestNotificationBarrier(t *testing.T) {
 				case "before":
 					close(before)
 					<-releaseBefore
+					beforeFinished.Store(true)
 				case "after":
 					close(after)
 					<-releaseAfter
 				case "permission":
+					requestSawBefore = beforeFinished.Load()
 					close(request)
 					<-releaseRequest
 				case "later":
@@ -553,6 +558,9 @@ func TestConnection_InboundRequestNotificationBarrier(t *testing.T) {
 			unblockBefore()
 			wait(after)
 			wait(request)
+			if ordered && !requestSawBefore {
+				t.Fatal("request handler started before preceding notification returned")
+			}
 			unblockAfter()
 			write(`{"jsonrpc":"2.0","method":"later"}`)
 			wait(later)
